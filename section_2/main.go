@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"net/http"
+	"net/url"
 
 	"database/sql"
 
@@ -17,10 +20,25 @@ type page struct {
 }
 
 type searchResult struct {
-	Title  string
-	Author string
-	Year   string
-	ID     string
+	Title  string `xml:"title,attr"`
+	Author string `xml:"author,attr"`
+	Year   string `xml:"hyr,attr"`
+	ID     string `xml:"owi,attr"`
+}
+
+type classifySearchResponse struct {
+	Results []searchResult `xml:"works>work"`
+}
+
+type classifyBookResponse struct {
+	BookData struct {
+		Title  string `xml:"title,attr"`
+		Author string `xml:"author,attr"`
+		ID     string `xml:"owi,attr"`
+	} `xml:"work"`
+	Classification struct {
+		MostPopular string `xml:"sfa,attr"`
+	} `xml:"recommendations>ddc>mostPopular"`
 }
 
 func main() {
@@ -43,10 +61,9 @@ func main() {
 	})
 
 	http.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
-		results := []searchResult{
-			searchResult{"Moby-Dick", "Herman Melville", "1851", "22222"},
-			searchResult{"The Adventures of Huckleberry Finn", "Mark Twain", "1884", "44444"},
-			searchResult{"The Catcher in the Rye", "JD Salinger", "1951", "33333"},
+		results, err := search(r.FormValue("search"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 
 		encoder := json.NewEncoder(w)
@@ -55,5 +72,57 @@ func main() {
 		}
 	})
 
+	http.HandleFunc("/books/add", func(w http.ResponseWriter, r *http.Request) {
+		book, err := find(r.FormValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		if err = db.Ping(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		_, err = db.Exec("insert into books (pk, title, author, id, classification) values (?, ?, ?, ?, ?)",
+			nil, book.BookData.Title, book.BookData.Author, book.BookData.ID,
+			book.Classification.MostPopular)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	fmt.Println(http.ListenAndServe(":8080", nil))
+}
+
+func find(id string) (classifyBookResponse, error) {
+	var c classifyBookResponse
+	body, err := classifyAPI("http://classify.oclc.org/classify2/Classify?summary=true&owi=" + url.QueryEscape(id))
+
+	if err != nil {
+		return classifyBookResponse{}, err
+	}
+
+	err = xml.Unmarshal(body, &c)
+	return c, err
+}
+
+func search(query string) ([]searchResult, error) {
+	var c classifySearchResponse
+	body, err := classifyAPI("http://classify.oclc.org/classify2/Classify?summary=true&title=" + url.QueryEscape(query))
+
+	if err != nil {
+		return []searchResult{}, err
+	}
+
+	err = xml.Unmarshal(body, &c)
+	return c.Results, err
+}
+
+func classifyAPI(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	defer resp.Body.Close()
+
+	return ioutil.ReadAll(resp.Body)
 }
